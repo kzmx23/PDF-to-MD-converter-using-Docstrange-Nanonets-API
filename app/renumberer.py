@@ -12,6 +12,11 @@ def renumber_markdown_files(base_input_path, output_dir):
         return
 
     base_name = os.path.splitext(os.path.basename(base_input_path))[0]
+
+    # For DJVU files, the converted PDF has "_converted" suffix
+    if base_input_path.lower().endswith('.djvu'):
+        base_name = f"{base_name}_converted"
+
     # Use glob to find all matching markdown files
     search_pattern = os.path.join(output_dir, f"{base_name}_pages_*.md")
     md_files = glob.glob(search_pattern)
@@ -142,7 +147,7 @@ def concatenate_markdown_files(base_input_path, output_dir):
     Finds, renumbers, and then concatenates all markdown files for a given base file.
     """
     print("\n=== Starting Markdown Concatenation Process ===")
-    
+
     # 1. Ensure files are correctly numbered before concatenation
     print("\nStep 1: Running page renumbering pre-check...")
     renumber_markdown_files(base_input_path, output_dir)
@@ -150,6 +155,11 @@ def concatenate_markdown_files(base_input_path, output_dir):
 
     # 2. Find all relevant markdown files again
     base_name = os.path.splitext(os.path.basename(base_input_path))[0]
+
+    # For DJVU files, the converted PDF has "_converted" suffix
+    if base_input_path.lower().endswith('.djvu'):
+        base_name = f"{base_name}_converted"
+
     search_pattern = os.path.join(output_dir, f"{base_name}_pages_*.md")
     md_files = glob.glob(search_pattern)
 
