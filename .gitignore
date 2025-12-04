@@ -14,5 +14,8 @@ __pycache__/
 # Output folder
 output/
 
+# Output folder
+test/
+
 # Pytest cache
 .pytest_cache/
