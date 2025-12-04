@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from .pdf_processor import analyze_pdf, calculate_chunks, split_pdf
 from .converter import convert_file, get_file_status, upload_chunk, retrieve_chunk
 from .renumberer import renumber_markdown_files, concatenate_markdown_files
+from .djvu_converter import convert_djvu_to_pdf
 
 def main():
     parser = argparse.ArgumentParser(description="Convert PDF to Markdown using DocStrange.")
@@ -16,6 +17,7 @@ def main():
     parser.add_argument("--file-status", help="Check the status of a single record_id or a comma-separated list of record_ids.")
     parser.add_argument("--page-renumber", action="store_true", help="Renumbers the '## Page X' tags in output markdown files based on the filename.")
     parser.add_argument("--concat-mds", action="store_true", help="Concatenates renumbered markdown files into a single file.")
+    parser.add_argument("--djvu-convert", action="store_true", help="Test DJVU to PDF conversion (converts input DJVU file to PDF without processing further).")
 
     args = parser.parse_args()
     
@@ -66,6 +68,30 @@ def main():
         concatenate_markdown_files(args.input_file, args.output_dir)
         return
 
+    # Handle --djvu-convert mode
+    if args.djvu_convert:
+        if not args.input_file:
+            parser.error("input_file is required when using --djvu-convert.")
+            return
+        if not args.input_file.lower().endswith('.djvu'):
+            print(f"Warning: Input file does not have .djvu extension: {args.input_file}")
+
+        # Create output directory
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir)
+
+        # Determine output PDF path
+        base_name = os.path.splitext(os.path.basename(args.input_file))[0]
+        output_pdf_path = os.path.join(args.output_dir, f"{base_name}_converted.pdf")
+
+        result = convert_djvu_to_pdf(args.input_file, output_pdf_path)
+        if result:
+            print(f"\n✓ DJVU conversion test successful!")
+            print(f"  Output: {result}")
+        else:
+            print(f"\n✗ DJVU conversion test failed.")
+        return
+
     # Ensure input_file is provided if not in status check mode
     if not args.input_file:
         parser.error("the following arguments are required: input_file")
@@ -73,7 +99,7 @@ def main():
 
     input_path = args.input_file
     output_dir = args.output_dir
-    
+
     if not os.path.exists(input_path):
         print(f"Error: File {input_path} not found.")
         return
@@ -81,6 +107,27 @@ def main():
     # Create output directory
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+
+    # Auto-detect and convert DJVU files
+    if input_path.lower().endswith('.djvu'):
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+        converted_pdf_path = os.path.join(output_dir, f"{base_name}_converted.pdf")
+
+        # Check if converted PDF already exists
+        if os.path.exists(converted_pdf_path):
+            print(f"Detected DJVU file. Converted PDF already exists: {os.path.basename(converted_pdf_path)}")
+            print(f"Skipping DJVU to PDF conversion.\n")
+            input_path = converted_pdf_path
+        else:
+            print(f"Detected DJVU file. Converting to PDF first...")
+            result = convert_djvu_to_pdf(input_path, converted_pdf_path)
+            if not result:
+                print("Error: Failed to convert DJVU to PDF. Aborting.")
+                return
+
+            # Update input_path to use the converted PDF
+            input_path = result
+            print(f"Using converted PDF: {input_path}\n")
 
     # Handle --convert-only mode (skip chunking, convert directly)
     if args.convert_only:
