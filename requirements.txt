@@ -1,0 +1,5 @@
+docstrange
+python-dotenv
+pypdf
+requests
+pytest
