@@ -151,6 +151,7 @@ The daemon module provides automated batch processing by monitoring an input fol
 ### Features
 
 -   **Continuous Monitoring**: Checks `input/` folder for PDF/DJVU files
+-   **Active Retrieval**: Automatically checks processing status and downloads completed results from the cloud
 -   **Automatic Processing**: Starts conversion workflow for new files
 -   **Completion Detection**: Identifies finished conversions (no lock files + all MD files exist)
 -   **Auto-Concatenation**: Automatically creates concatenated markdown files for completed conversions
@@ -161,14 +162,18 @@ The daemon module provides automated batch processing by monitoring an input fol
 ### Workflow
 
 1. Check `input/` folder for PDF/DJVU files
-2. Start conversion for new files (no existing chunks in output/)
-3. Check for finished conversions:
+2. **Active Retrieval Phase**: For files with lock files (being processed):
+   - Run `--retrieve-only` to check processing status
+   - Download completed MD files from the cloud
+   - Remove lock files for completed chunks
+3. **Completion Detection**: Check for finished conversions:
    - No `.lock` files exist for any chunks
    - All chunks have corresponding `.md` files
-4. For finished conversions:
+4. **Finalization Phase**: For finished conversions:
    - Run concatenation to create `{name}_concat_pages_X_Y.md`
    - Move source file to `output/done/`
    - Move all chunks, MD files, and concatenated file to `output/done/`
+5. **New Files Phase**: Start conversion for new files (no existing chunks in output/)
 
 ### Manual Execution
 
