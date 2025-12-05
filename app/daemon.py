@@ -89,6 +89,24 @@ def get_base_name(file_path):
     return os.path.splitext(os.path.basename(file_path))[0]
 
 
+def has_lock_files(source_file):
+    """
+    Check if a source file has any lock files (indicating processing in progress).
+    Returns True if lock files exist.
+    """
+    base_name = get_base_name(source_file)
+
+    # For DJVU files, the converted PDF name is different
+    if source_file.lower().endswith('.djvu'):
+        base_name = f"{base_name}_converted"
+
+    # Find all related lock files in output folder
+    lock_pattern = os.path.join(OUTPUT_FOLDER, f"{base_name}_pages_*.pdf.lock")
+    lock_files = glob.glob(lock_pattern)
+
+    return len(lock_files) > 0
+
+
 def is_conversion_finished(source_file):
     """
     Check if conversion is finished for a source file.
@@ -114,14 +132,12 @@ def is_conversion_finished(source_file):
     for chunk_file in chunk_files:
         lock_file = f"{chunk_file}.lock"
         if os.path.exists(lock_file):
-            log_message(f"  Lock file exists: {os.path.basename(lock_file)}")
             return False
 
     # Check if all chunks have corresponding .md files
     for chunk_file in chunk_files:
         md_file = chunk_file.replace('.pdf', '.md')
         if not os.path.exists(md_file):
-            log_message(f"  Missing MD file: {os.path.basename(md_file)}")
             return False
 
     return True
@@ -175,6 +191,62 @@ def run_conversion(source_file):
 
     except subprocess.TimeoutExpired:
         log_message(f"  ERROR: Conversion timed out after 1 hour")
+        return False
+    except Exception as e:
+        log_message(f"  ERROR: {str(e)}")
+        return False
+
+
+def run_retrieval(source_file):
+    """
+    Run the retrieval workflow for a file that's being processed.
+    Uses --retrieve-only flag to check status and download completed files.
+    Returns True if retrieval was run successfully (regardless of completion status).
+    """
+    log_message(f"Retrieving results for: {os.path.basename(source_file)}")
+
+    try:
+        # Change to project root directory
+        os.chdir(PROJECT_ROOT)
+
+        # Run the app with --retrieve-only
+        cmd = [
+            sys.executable, "-m", "app",
+            source_file,
+            "--output-dir", OUTPUT_FOLDER,
+            "--retrieve-only"
+        ]
+
+        log_message(f"  Command: {' '.join(cmd)}")
+
+        # Run and capture output
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 minute timeout
+        )
+
+        # Log the output
+        if result.stdout:
+            for line in result.stdout.split('\n'):
+                if line.strip():
+                    log_message(f"  [APP] {line}", include_timestamp=False)
+
+        if result.stderr:
+            for line in result.stderr.split('\n'):
+                if line.strip():
+                    log_message(f"  [ERR] {line}", include_timestamp=False)
+
+        if result.returncode == 0:
+            log_message(f"  Retrieval check completed")
+            return True
+        else:
+            log_message(f"  Retrieval check failed with exit code {result.returncode}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        log_message(f"  ERROR: Retrieval timed out")
         return False
     except Exception as e:
         log_message(f"  ERROR: {str(e)}")
@@ -336,6 +408,21 @@ def process_new_files():
             run_conversion(source_file)
 
 
+def process_pending_retrievals():
+    """
+    Check for files with lock files and run retrieval to check if processing is complete.
+    This actively retrieves results for files currently being processed in the cloud.
+    """
+    input_files = find_input_files()
+
+    for source_file in input_files:
+        # Check if file has lock files (indicating it's being processed)
+        if has_lock_files(source_file):
+            log_message(f"Found file with lock files: {os.path.basename(source_file)}")
+            # Run retrieval to check status and download if ready
+            run_retrieval(source_file)
+
+
 def main():
     """Main daemon entry point."""
     log_message("=" * 60)
@@ -357,10 +444,13 @@ def main():
 
             log_message(f"Found {len(input_files)} file(s) in input folder")
 
-            # First, check for finished conversions
+            # First, try to retrieve results for files being processed
+            process_pending_retrievals()
+
+            # Then, check for finished conversions and concatenate
             process_finished_conversions()
 
-            # Then, process new files
+            # Finally, process new files
             process_new_files()
 
             log_message("Daemon finished")
