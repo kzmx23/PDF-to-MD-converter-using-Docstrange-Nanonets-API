@@ -1,27 +1,27 @@
 import os
-import time
-import requests
-
-import os
 import re
 import time
 import requests
+from requests.exceptions import SSLError, ConnectionError, Timeout
+from .accounts import get_all_accounts, get_api_key, parse_lock_file, format_lock_content
 
-def convert_file(file_path, output_dir, api_key, retrieve_only=False):
+
+def convert_file(file_path, output_dir):
     """
     Handles the simple, one-shot conversion for a single file.
     Used for --convert-only mode.
     """
-    print(f"  → Uploading '{os.path.basename(file_path)}'...")
-    upload_chunk(file_path, output_dir, api_key)
-    
-    print(f"  → Retrieving '{os.path.basename(file_path)}'...")
-    return retrieve_chunk(file_path, output_dir, api_key)
+    print(f"  -> Uploading '{os.path.basename(file_path)}'...")
+    upload_chunk(file_path, output_dir)
+
+    print(f"  -> Retrieving '{os.path.basename(file_path)}'...")
+    return retrieve_chunk(file_path, output_dir)
 
 
-def upload_chunk(file_path, output_dir, api_key):
+def upload_chunk(file_path, output_dir):
     """
-    Uploads a single file chunk and saves its record_id to a lock file.
+    Uploads a single file chunk with failover across all configured accounts.
+    Saves account_id:record_id to lock file.
     Skips if a lock file already exists or if the final MD file exists.
     """
     base_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -30,29 +30,46 @@ def upload_chunk(file_path, output_dir, api_key):
 
     # First, check if the final output already exists and there's no lock file
     if os.path.exists(output_md_path) and not os.path.exists(lock_file_path):
-        print(f"  → Markdown file already exists for {base_name}. Skipping upload.")
-        return
+        print(f"  -> Markdown file already exists for {base_name}. Skipping upload.")
+        return True
 
     # Then, check if it's currently being processed
     if os.path.exists(lock_file_path):
-        print(f"  → Lock file already exists for {base_name}. Skipping upload.")
-        return
+        print(f"  -> Lock file already exists for {base_name}. Skipping upload.")
+        return True
 
-    record_id = upload_file(file_path, api_key)
+    # Try each account until one succeeds
+    accounts = get_all_accounts()
+    if not accounts:
+        print(f"  x No API accounts configured!")
+        return False
 
-    if not record_id:
-        print(f"  ✗ Failed to upload file {base_name}")
-        return
+    for account_id, api_key in accounts:
+        print(f"  -> Trying account {account_id}...")
+        record_id, should_continue = upload_file(file_path, api_key)
 
-    print(f"  → File uploaded. Record ID: {record_id}")
-    with open(lock_file_path, "w") as f:
-        f.write(str(record_id))
-    print(f"  → Created lock file for {base_name}.")
+        if record_id:
+            print(f"  -> File uploaded via account {account_id}. Record ID: {record_id}")
+            lock_content = format_lock_content(account_id, record_id)
+            with open(lock_file_path, "w") as f:
+                f.write(lock_content)
+            print(f"  -> Created lock file for {base_name}.")
+            return True
+
+        if not should_continue:
+            # Non-recoverable error, don't try other accounts
+            break
+
+        # Rate limit or similar - try next account
+        print(f"  -> Account {account_id} unavailable, trying next...")
+
+    print(f"  x Failed to upload file {base_name} (all accounts exhausted)")
+    return False
 
 
-def retrieve_chunk(file_path, output_dir, api_key):
+def retrieve_chunk(file_path, output_dir):
     """
-    Retrieves a single file chunk using the record_id from its lock file.
+    Retrieves a single file chunk using the account_id:record_id from its lock file.
     Returns the file path on success, a status string if not complete, or None on error.
     """
     base_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -60,14 +77,23 @@ def retrieve_chunk(file_path, output_dir, api_key):
     output_md_path = os.path.join(output_dir, f"{base_name}.md")
 
     if not os.path.exists(lock_file_path):
-        print(f"  ✗ No lock file found for {base_name}. Cannot retrieve.")
+        print(f"  x No lock file found for {base_name}. Cannot retrieve.")
         return None
 
     with open(lock_file_path, "r") as f:
-        record_id = f.read().strip()
+        lock_content = f.read().strip()
 
-    if not record_id:
-        print(f"  ✗ Lock file for {base_name} is empty. Cannot retrieve.")
+    if not lock_content:
+        print(f"  x Lock file for {base_name} is empty. Cannot retrieve.")
+        return None
+
+    # Parse lock file (supports both old and new format)
+    account_id, record_id = parse_lock_file(lock_content)
+
+    try:
+        api_key = get_api_key(account_id)
+    except ValueError as e:
+        print(f"  x {e}")
         return None
 
     # Get total pages for progress reporting
@@ -87,107 +113,220 @@ def retrieve_chunk(file_path, output_dir, api_key):
 
     # If result is None (error), return None
     if result is None:
-        print(f"  ✗ Failed to retrieve content for {base_name} (Record ID: {record_id})")
+        print(f"  x Failed to retrieve content for {base_name} (Account: {account_id}, Record ID: {record_id})")
         return None
 
     # Otherwise, result is the markdown content
     markdown_content = result
-    print(f"  → Content retrieved for {base_name}.")
+    print(f"  -> Content retrieved for {base_name}.")
     with open(output_md_path, "w", encoding="utf-8") as f:
         f.write(markdown_content)
 
-    print(f"  → Saved to: {output_md_path}")
-    
+    print(f"  -> Saved to: {output_md_path}")
+
     os.remove(lock_file_path)
-    print(f"  → Removed lock file for {base_name}.")
-    
+    print(f"  -> Removed lock file for {base_name}.")
+
     return output_md_path
 
 
-
-def upload_file(file_path, api_key):
+def upload_file(file_path, api_key, max_retries=3, retry_delay=5):
     """
     Upload file to NanoNets API for async processing.
-    Returns record_id on success, None on failure.
+    Returns (record_id, should_continue) tuple.
+    - record_id: the ID on success, None on failure
+    - should_continue: True if should try next account (rate limit), False otherwise
+    Includes retry logic for transient errors (SSL, connection, timeout).
     """
     url = "https://extraction-api.nanonets.com/extract-async"
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    try:
-        with open(file_path, "rb") as f:
-            files = {"file": f}
-            data = {
-                "output_type": "markdown",
-                "model_type": "nanonets"
-            }
+    # Errors that warrant a retry
+    retryable_exceptions = (SSLError, ConnectionError, Timeout)
 
-            response = requests.post(url, headers=headers, files=files, data=data)
-            response.raise_for_status()
+    for attempt in range(1, max_retries + 1):
+        try:
+            with open(file_path, "rb") as f:
+                files = {"file": f}
+                data = {
+                    "output_type": "markdown",
+                    "model_type": "nanonets"
+                }
 
-            result = response.json()
+                response = requests.post(url, headers=headers, files=files, data=data, timeout=300)
 
-            if result.get("success"):
-                return result.get("record_id")
+                # Handle rate limiting (429) - try next account
+                if response.status_code == 429:
+                    try:
+                        error_detail = response.json().get('detail', 'Rate limit exceeded')
+                    except ValueError:
+                        error_detail = response.text or 'Rate limit exceeded'
+                    print(f"  x API Rate Limit: {error_detail}")
+                    return None, True  # Try next account
+
+                # Handle access errors (403) - try next account
+                if response.status_code == 403:
+                    try:
+                        error_detail = response.json().get('detail', 'Access forbidden')
+                    except ValueError:
+                        error_detail = response.text or 'Access forbidden'
+                    print(f"  x API Access Error: {error_detail}")
+                    return None, True  # Try next account
+
+                # Handle server errors (5xx) - these might be transient
+                if response.status_code >= 500:
+                    try:
+                        error_detail = response.json().get('detail', f'Server error {response.status_code}')
+                    except ValueError:
+                        error_detail = response.text or f'Server error {response.status_code}'
+                    print(f"  x API Server Error: {error_detail}")
+                    if attempt < max_retries:
+                        print(f"  ~ Retrying in {retry_delay}s... (attempt {attempt}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+                    return None, True  # Try next account after retries exhausted
+
+                response.raise_for_status()
+                result = response.json()
+
+                if result.get("success"):
+                    return result.get("record_id"), False
+                else:
+                    error_msg = result.get('message') or result.get('detail') or 'Unknown error'
+                    print(f"  x Upload failed: {error_msg}")
+                    return None, False  # Don't try next account for API errors
+
+        except retryable_exceptions as e:
+            error_type = type(e).__name__
+            print(f"  x {error_type}: {e}")
+            if attempt < max_retries:
+                print(f"  ~ Retrying in {retry_delay}s... (attempt {attempt}/{max_retries})")
+                time.sleep(retry_delay)
             else:
-                print(f"  ✗ Upload failed: {result.get('message', 'Unknown error')}")
-                return None
+                print(f"  x Max retries ({max_retries}) exceeded.")
+                return None, True  # Try next account
 
-    except requests.exceptions.RequestException as e:
-        print(f"  ✗ Request error: {e}")
-        if hasattr(e.response, 'text'):
-            print(f"  Response: {e.response.text}")
-        return None
-    except Exception as e:
-        print(f"  ✗ Error uploading file: {e}")
-        return None
+        except requests.exceptions.RequestException as e:
+            print(f"  x Request error: {e}")
+            # Try to get more details from the response
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_detail = e.response.json().get('detail', e.response.text)
+                except ValueError:
+                    error_detail = e.response.text
+                if error_detail:
+                    print(f"  -> API message: {error_detail}")
+            return None, False
+
+        except Exception as e:
+            print(f"  x Error uploading file: {e}")
+            return None, False
+
+    return None, True
 
 
-def check_status_and_retrieve(record_id, api_key, total_pages=0):
+def check_status_and_retrieve(record_id, api_key, total_pages=0, max_retries=3, retry_delay=5):
     """
     Checks the API status once and retrieves the result if completed.
     Does not poll. Returns content on success, status string if processing,
     or None on failure.
+    Includes retry logic for transient errors (SSL, connection, timeout, 5xx).
     """
     url = f"https://extraction-api.nanonets.com/files/{record_id}"
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        result = response.json()
+    # Errors that warrant a retry
+    retryable_exceptions = (SSLError, ConnectionError, Timeout)
 
-        if not result.get("success"):
-            print(f"  ✗ API returned error: {result.get('detail', 'Unknown error')}")
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=60)
+
+            # Handle rate limiting (429)
+            if response.status_code == 429:
+                try:
+                    error_detail = response.json().get('detail', 'Rate limit exceeded')
+                except ValueError:
+                    error_detail = response.text or 'Rate limit exceeded'
+                print(f"  x API Rate Limit: {error_detail}")
+                return None
+
+            # Handle access errors (403)
+            if response.status_code == 403:
+                try:
+                    error_detail = response.json().get('detail', 'Access forbidden')
+                except ValueError:
+                    error_detail = response.text or 'Access forbidden'
+                print(f"  x API Access Error: {error_detail}")
+                return None
+
+            # Handle server errors (5xx) - these might be transient
+            if response.status_code >= 500:
+                try:
+                    error_detail = response.json().get('detail', f'Server error {response.status_code}')
+                except ValueError:
+                    error_detail = response.text or f'Server error {response.status_code}'
+                print(f"  x API Server Error: {error_detail}")
+                if attempt < max_retries:
+                    print(f"  ~ Retrying in {retry_delay}s... (attempt {attempt}/{max_retries})")
+                    time.sleep(retry_delay)
+                    continue
+                return None
+
+            response.raise_for_status()
+            result = response.json()
+
+            if not result.get("success"):
+                error_detail = result.get('detail', 'Unknown error')
+                print(f"  x API returned error: {error_detail}")
+                return None
+
+            status = result.get("processing_status") or result.get("status")
+
+            if status == "completed":
+                print(f"  -> Status: completed.")
+                content = result.get("content", "")
+                if not content:
+                    print(f"  ! Warning: Content is empty in completed response.")
+                return content
+            elif status in ["processing", "failed"]:
+                progress_info = ""
+                if status == "processing" and total_pages > 0:
+                    pages_done = result.get("pages_processed", 0)
+                    proc_time = result.get("processing_time", 0.0)
+                    progress_info = f" (page {pages_done}/{total_pages} - {proc_time:.2f}s)"
+                print(f"  -> Status: {status}{progress_info}. Will check again later.")
+                return status
+            else:
+                print(f"  ! Unknown status: {status}")
+                return status
+
+        except retryable_exceptions as e:
+            error_type = type(e).__name__
+            print(f"  x {error_type}: {e}")
+            if attempt < max_retries:
+                print(f"  ~ Retrying in {retry_delay}s... (attempt {attempt}/{max_retries})")
+                time.sleep(retry_delay)
+            else:
+                print(f"  x Max retries ({max_retries}) exceeded.")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            print(f"  x Request error while checking status: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_detail = e.response.json().get('detail', e.response.text)
+                except ValueError:
+                    error_detail = e.response.text
+                if error_detail:
+                    print(f"  -> API message: {error_detail}")
             return None
 
-        status = result.get("processing_status") or result.get("status")
+        except Exception as e:
+            print(f"  x Error while checking status: {e}")
+            return None
 
-        if status == "completed":
-            print(f"  → Status: completed.")
-            content = result.get("content", "")
-            if not content:
-                print(f"  ⚠ Warning: Content is empty in completed response.")
-            return content
-        elif status in ["processing", "failed"]:
-            progress_info = ""
-            if status == "processing" and total_pages > 0:
-                pages_done = result.get("pages_processed", 0)
-                proc_time = result.get("processing_time", 0.0)
-                progress_info = f" (page {pages_done}/{total_pages} - {proc_time:.2f}s)"
-            print(f"  → Status: {status}{progress_info}. Will check again later.")
-            return status
-        else:
-            print(f"  ⚠ Unknown status: {status}")
-            return status
-
-    except requests.exceptions.RequestException as e:
-        print(f"  ✗ Request error while checking status: {e}")
-        if hasattr(e, 'response') and hasattr(e.response, 'text'):
-            print(f"  Response: {e.response.text}")
-        return None
-    except Exception as e:
-        print(f"  ✗ Error while checking status: {e}")
-        return None
+    return None
 
 
 def get_file_status(record_id, api_key):
@@ -202,7 +341,7 @@ def get_file_status(record_id, api_key):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"  ✗ Request error for record_id {record_id}: {e}")
+        print(f"  x Request error for record_id {record_id}: {e}")
         if hasattr(e, 'response') and e.response is not None:
             try:
                 return e.response.json()
@@ -210,6 +349,5 @@ def get_file_status(record_id, api_key):
                 return {"success": False, "detail": e.response.text}
         return None
     except Exception as e:
-        print(f"  ✗ An unexpected error occurred for record_id {record_id}: {e}")
+        print(f"  x An unexpected error occurred for record_id {record_id}: {e}")
         return None
-

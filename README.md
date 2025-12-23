@@ -7,7 +7,9 @@ A Python application that converts PDF and DJVU files to Markdown format using t
 -   **PDF & DJVU to Markdown Conversion**: Utilizes the NanoNets async API to convert PDF and DJVU content to Markdown.
 -   **DJVU Support**: Automatically detects and converts DJVU files to PDF before processing. Smart caching avoids redundant conversions.
 -   **Automatic File Splitting**: Handles PDF files that exceed the API's limits (50MB size or 200 pages) by automatically splitting them into valid chunks.
--   **Resumable Processing**: Creates `.lock` files for uploaded chunks, allowing the conversion to be resumed if interrupted. The `--retrieve-only` flag forces the app to only check for results of already-uploaded files.
+-   **Multi-Account Failover**: Configure up to 4 NanoNets API accounts for automatic failover when rate limits are exceeded. Different chunks can use different accounts.
+-   **Resumable Processing**: Creates `.lock` files for uploaded chunks (storing account_id:record_id), allowing the conversion to be resumed if interrupted. The `--retrieve-only` flag forces the app to only check for results of already-uploaded files.
+-   **Smart Retry Logic**: Automatically retries transient errors (SSL, connection timeouts, 5xx server errors) up to 3 times before failing over to the next account.
 -   **Page Renumbering**: Fixes page numbering in the final Markdown files. The API generates each chunk starting from "Page 1," and the `--page-renumber` tool corrects this to reflect the original document's pagination.
 -   **File Concatenation**: The `--concat-mds` tool merges the individual, renumbered Markdown chunks into a single, complete document.
 -   **Status Checking**: The `--file-status` utility allows you to check the processing status of one or more jobs using their `record_id`.
@@ -24,6 +26,7 @@ nanonets_pdf_ocr/
 │   ├── main.py              # Main entry point, handles CLI arguments
 │   ├── pdf_processor.py     # PDF analysis and splitting logic
 │   ├── converter.py         # Handles all communication with the NanoNets API
+│   ├── accounts.py          # Multi-account management and failover logic
 │   ├── renumberer.py        # Contains logic for renumbering and concatenating MD files
 │   ├── djvu_converter.py    # DJVU to PDF conversion using ddjvu
 │   └── daemon.py            # Automated daemon for batch processing
@@ -69,12 +72,27 @@ nanonets_pdf_ocr/
     ```
 
 5.  **Create your environment file**
-    Copy the example file and add your API key.
+    Copy the example file and configure your API accounts.
     ```bash
     cp .env-example .env
-    # Now edit .env and add your key
-    # API_KEY=your_nanonets_api_key_here
+    # Now edit .env and add your API keys
     ```
+
+    The application supports up to 4 NanoNets API accounts for automatic failover:
+    ```bash
+    # .env file format
+    API_KEY_1=your_first_api_key_here
+    API_KEY_2=your_second_api_key_here   # Optional
+    API_KEY_3=your_third_api_key_here    # Optional
+    API_KEY_4=your_fourth_api_key_here   # Optional
+    ```
+
+    **Failover Behavior:**
+    - When uploading chunks, the app tries accounts in order (1→2→3→4)
+    - If an account hits rate limit (429) or access error (403), it automatically tries the next account
+    - Each chunk's lock file stores which account was used: `account_id:record_id`
+    - When retrieving results, the app uses the correct account based on the lock file
+    - You only need to configure API_KEY_1 minimum; additional accounts are optional but recommended for high-volume processing
 
 ## Usage
 
@@ -127,6 +145,11 @@ These tools work on already generated files or use record IDs.
     python3 -m app --file-status=111111,222222
     ```
 
+    Use `--account <N>` to specify which API account to use for status checks (default: account 1):
+    ```bash
+    python3 -m app --file-status=111111 --account=2
+    ```
+
 -   `--page-renumber`: Corrects the `## Page X` tags in the generated Markdown files. Requires `input_file` to identify the set of files to process.
     ```bash
     python3 -m app "test/том 1 книга 3.pdf" --page-renumber
@@ -151,6 +174,7 @@ The daemon module provides automated batch processing by monitoring an input fol
 ### Features
 
 -   **Continuous Monitoring**: Checks `input/` folder for PDF/DJVU files
+-   **Multi-Account Failover**: Automatically uses all configured API accounts with failover
 -   **Active Retrieval**: Automatically checks processing status and downloads completed results from the cloud
 -   **Automatic Processing**: Starts conversion workflow for new files
 -   **Completion Detection**: Identifies finished conversions (no lock files + all MD files exist)

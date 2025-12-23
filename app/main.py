@@ -6,6 +6,7 @@ from .pdf_processor import analyze_pdf, calculate_chunks, split_pdf
 from .converter import convert_file, get_file_status, upload_chunk, retrieve_chunk
 from .renumberer import renumber_markdown_files, concatenate_markdown_files
 from .djvu_converter import convert_djvu_to_pdf
+from .accounts import get_api_key, get_account_count
 
 def main():
     parser = argparse.ArgumentParser(description="Convert PDF to Markdown using DocStrange.")
@@ -15,24 +16,32 @@ def main():
     parser.add_argument("--convert-only", action="store_true", help="Skip chunking logic and convert the file directly (for testing).")
     parser.add_argument("--retrieve-only", action="store_true", help="Force retrieval of a previously uploaded file by reading its record_id from a .lock file.")
     parser.add_argument("--file-status", help="Check the status of a single record_id or a comma-separated list of record_ids.")
+    parser.add_argument("--account", type=int, default=1, help="Account ID to use for --file-status (1-4, default: 1).")
     parser.add_argument("--page-renumber", action="store_true", help="Renumbers the '## Page X' tags in output markdown files based on the filename.")
     parser.add_argument("--concat-mds", action="store_true", help="Concatenates renumbered markdown files into a single file.")
     parser.add_argument("--djvu-convert", action="store_true", help="Test DJVU to PDF conversion (converts input DJVU file to PDF without processing further).")
 
     args = parser.parse_args()
-    
+
     # Load environment variables
     load_dotenv()
-    api_key = os.getenv("API_KEY")
-    
-    if not api_key:
-        print("Error: API_KEY not found in .env file.")
+
+    # Check if any accounts are configured
+    if get_account_count() == 0:
+        print("Error: No API accounts configured in .env file.")
+        print("Please add API_KEY_1, API_KEY_2, etc. to your .env file.")
         return
 
     # Handle --file-status mode
     if args.file_status:
+        try:
+            api_key = get_api_key(args.account)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return
+
         record_ids = [rid.strip() for rid in args.file_status.split(',')]
-        print(f"--- Checking status for {len(record_ids)} record(s) ---")
+        print(f"--- Checking status for {len(record_ids)} record(s) (using account {args.account}) ---")
         for rid in record_ids:
             print(f"\n--- Status for Record ID: {rid} ---")
             status_info = get_file_status(rid, api_key)
@@ -41,7 +50,7 @@ def main():
                 filename = status_info.get("filename", "N/A")
                 pages = status_info.get("pages_processed", "N/A")
                 proc_time = status_info.get("processing_time", "N/A")
-                
+
                 print(f"  Status:          {status}")
                 print(f"  Filename:        {filename}")
                 print(f"  Pages Processed: {pages}")
@@ -59,7 +68,7 @@ def main():
             return
         renumber_markdown_files(args.input_file, args.output_dir)
         return
-        
+
     # Handle --concat-mds mode
     if args.concat_mds:
         if not args.input_file:
@@ -86,10 +95,10 @@ def main():
 
         result = convert_djvu_to_pdf(args.input_file, output_pdf_path)
         if result:
-            print(f"\n✓ DJVU conversion test successful!")
+            print(f"\n+ DJVU conversion test successful!")
             print(f"  Output: {result}")
         else:
-            print(f"\n✗ DJVU conversion test failed.")
+            print(f"\nx DJVU conversion test failed.")
         return
 
     # Ensure input_file is provided if not in status check mode
@@ -132,7 +141,7 @@ def main():
     # Handle --convert-only mode (skip chunking, convert directly)
     if args.convert_only:
         print(f"Convert-only mode: Converting {input_path} directly...")
-        result = convert_file(input_path, output_dir, api_key)
+        result = convert_file(input_path, output_dir)
         if result:
             print(f"Conversion successful!")
         else:
@@ -150,10 +159,10 @@ def main():
 
     print(f"File Size: {size_mb:.2f} MB")
     print(f"Page Count: {num_pages}")
-    
+
     # 2. Calculate Chunks
     chunks = calculate_chunks(size_mb, num_pages)
-    
+
     if args.dry_run:
         print("\n--- Dry Run Plan ---")
         if len(chunks) == 1 and chunks[0] == (1, num_pages) and size_mb <= 50 and num_pages <= 200:
@@ -173,29 +182,30 @@ def main():
         os.makedirs(output_dir)
 
     files_to_convert = []
-    
+
     # Check if splitting is actually needed
     if len(chunks) == 1 and chunks[0] == (1, num_pages) and size_mb <= 50 and num_pages <= 200:
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         new_filename = f"{base_name}_pages_1_{num_pages}.pdf"
         new_path = os.path.join(output_dir, new_filename)
-        
+
         # Copy file to output dir with new name
         shutil.copy(input_path, new_path)
         files_to_convert.append(new_path)
-        
+
     else:
         print("Splitting file...")
         files_to_convert = split_pdf(input_path, chunks, output_dir)
-        
+
     # 4. Upload Phase
     if not args.retrieve_only:
         print(f"\n{'='*25} UPLOAD PHASE {'='*24}")
         print(f"Starting upload of {len(files_to_convert)} file(s)...")
+        print(f"Using {get_account_count()} API account(s) with failover")
         print(f"{'='*60}\n")
         for i, file_path in enumerate(files_to_convert, 1):
             print(f"[{i}/{len(files_to_convert)}] Uploading: {os.path.basename(file_path)}")
-            upload_chunk(file_path, output_dir, api_key)
+            upload_chunk(file_path, output_dir)
             print("-" * 30)
     else:
         print(f"\n{'='*25} UPLOAD PHASE SKIPPED {'='*24}")
@@ -212,8 +222,8 @@ def main():
 
     for i, file_path in enumerate(files_to_convert, 1):
         print(f"[{i}/{len(files_to_convert)}] Checking: {os.path.basename(file_path)}")
-        result = retrieve_chunk(file_path, output_dir, api_key)
-        
+        result = retrieve_chunk(file_path, output_dir)
+
         if result == "processing":
             processing_count += 1
         elif result == "failed":
@@ -223,7 +233,7 @@ def main():
             # Error message is already printed by retrieve_chunk
         else:
             successful += 1
-            print(f"✓ Success\n")
+            print(f"+ Success\n")
 
     print(f"{'='*60}")
     print(f"Retrieval complete!")
@@ -241,4 +251,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

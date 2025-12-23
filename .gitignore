@@ -11,11 +11,17 @@ __pycache__/
 # Environment variables
 .env
 
+# Input folder
+input/
+
 # Output folder
 output/
 
 # Output folder
 test/
+
+# logs folder
+logs/
 
 # Pytest cache
 .pytest_cache/
