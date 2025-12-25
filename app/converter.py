@@ -276,12 +276,19 @@ def check_status_and_retrieve(record_id, api_key, total_pages=0, max_retries=3, 
             response.raise_for_status()
             result = response.json()
 
+            # Log API response details
+            api_status = result.get("processing_status") or result.get("status", "unknown")
+            api_filename = result.get("filename", "N/A")
+            api_pages = result.get("pages_processed", 0)
+            api_time = result.get("processing_time", 0.0)
+            print(f"  -> API Response: status={api_status}, file={api_filename}, pages={api_pages}, time={api_time:.1f}s")
+
             if not result.get("success"):
                 error_detail = result.get('detail', 'Unknown error')
                 print(f"  x API returned error: {error_detail}")
                 return None
 
-            status = result.get("processing_status") or result.get("status")
+            status = api_status
 
             if status == "completed":
                 print(f"  -> Status: completed.")
@@ -292,9 +299,7 @@ def check_status_and_retrieve(record_id, api_key, total_pages=0, max_retries=3, 
             elif status in ["processing", "failed"]:
                 progress_info = ""
                 if status == "processing" and total_pages > 0:
-                    pages_done = result.get("pages_processed", 0)
-                    proc_time = result.get("processing_time", 0.0)
-                    progress_info = f" (page {pages_done}/{total_pages} - {proc_time:.2f}s)"
+                    progress_info = f" (page {api_pages}/{total_pages} - {api_time:.2f}s)"
                 print(f"  -> Status: {status}{progress_info}. Will check again later.")
                 return status
             else:

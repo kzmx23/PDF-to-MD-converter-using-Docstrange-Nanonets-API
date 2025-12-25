@@ -1,4 +1,6 @@
 import os
+import re
+import glob
 import argparse
 import shutil
 from dotenv import load_dotenv
@@ -7,6 +9,28 @@ from .converter import convert_file, get_file_status, upload_chunk, retrieve_chu
 from .renumberer import renumber_markdown_files, concatenate_markdown_files
 from .djvu_converter import convert_djvu_to_pdf
 from .accounts import get_api_key, get_account_count
+
+
+def find_existing_chunks(base_name, output_dir):
+    """
+    Find existing chunk files in output directory based on lock files.
+    Returns list of PDF file paths that have corresponding lock files.
+    """
+    # Pattern to match lock files: basename_pages_X_Y.pdf.lock
+    lock_pattern = os.path.join(output_dir, f"{glob.escape(base_name)}_pages_*.pdf.lock")
+    lock_files = glob.glob(lock_pattern)
+
+    if not lock_files:
+        return []
+
+    # Extract PDF paths from lock files
+    chunk_files = []
+    for lock_file in sorted(lock_files):
+        # Remove .lock extension to get PDF path
+        pdf_path = lock_file[:-5]  # Remove ".lock"
+        chunk_files.append(pdf_path)
+
+    return chunk_files
 
 def main():
     parser = argparse.ArgumentParser(description="Convert PDF to Markdown using DocStrange.")
@@ -150,52 +174,61 @@ def main():
 
     print(f"Processing {input_path}...")
 
-    # 1. Analyze PDF
-    try:
-        size_mb, num_pages = analyze_pdf(input_path)
-    except Exception as e:
-        print(f"Error analyzing PDF: {e}")
-        return
+    base_name = os.path.splitext(os.path.basename(input_path))[0]
 
-    print(f"File Size: {size_mb:.2f} MB")
-    print(f"Page Count: {num_pages}")
-
-    # 2. Calculate Chunks
-    chunks = calculate_chunks(size_mb, num_pages)
-
-    if args.dry_run:
-        print("\n--- Dry Run Plan ---")
-        if len(chunks) == 1 and chunks[0] == (1, num_pages) and size_mb <= 50 and num_pages <= 200:
-             print("File is within limits. No splitting required.")
-             print(f"Plan: Convert {input_path} -> {os.path.join(output_dir, os.path.splitext(os.path.basename(input_path))[0] + '.md')}")
-        else:
-            print("Splitting required:")
-            for i, (start, end) in enumerate(chunks):
-                base_name = os.path.splitext(os.path.basename(input_path))[0]
-                chunk_filename = f"{base_name}_pages_{start}_{end}.pdf"
-                print(f"  Chunk {i+1}: Pages {start}-{end} -> {chunk_filename}")
-        print("--------------------")
-        return
-
-    # 3. Process
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    files_to_convert = []
-
-    # Check if splitting is actually needed
-    if len(chunks) == 1 and chunks[0] == (1, num_pages) and size_mb <= 50 and num_pages <= 200:
-        base_name = os.path.splitext(os.path.basename(input_path))[0]
-        new_filename = f"{base_name}_pages_1_{num_pages}.pdf"
-        new_path = os.path.join(output_dir, new_filename)
-
-        # Copy file to output dir with new name
-        shutil.copy(input_path, new_path)
-        files_to_convert.append(new_path)
-
+    # For --retrieve-only mode, find existing lock files instead of recalculating chunks
+    if args.retrieve_only:
+        files_to_convert = find_existing_chunks(base_name, output_dir)
+        if not files_to_convert:
+            print(f"No lock files found for '{base_name}' in {output_dir}/")
+            print("Nothing to retrieve. Run without --retrieve-only to upload first.")
+            return
+        print(f"Found {len(files_to_convert)} existing chunk(s) with lock files")
     else:
-        print("Splitting file...")
-        files_to_convert = split_pdf(input_path, chunks, output_dir)
+        # 1. Analyze PDF
+        try:
+            size_mb, num_pages = analyze_pdf(input_path)
+        except Exception as e:
+            print(f"Error analyzing PDF: {e}")
+            return
+
+        print(f"File Size: {size_mb:.2f} MB")
+        print(f"Page Count: {num_pages}")
+
+        # 2. Calculate Chunks
+        chunks = calculate_chunks(size_mb, num_pages)
+
+        if args.dry_run:
+            print("\n--- Dry Run Plan ---")
+            if len(chunks) == 1 and chunks[0] == (1, num_pages) and size_mb <= 50 and num_pages <= 200:
+                 print("File is within limits. No splitting required.")
+                 print(f"Plan: Convert {input_path} -> {os.path.join(output_dir, os.path.splitext(os.path.basename(input_path))[0] + '.md')}")
+            else:
+                print("Splitting required:")
+                for i, (start, end) in enumerate(chunks):
+                    chunk_filename = f"{base_name}_pages_{start}_{end}.pdf"
+                    print(f"  Chunk {i+1}: Pages {start}-{end} -> {chunk_filename}")
+            print("--------------------")
+            return
+
+        # 3. Process
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        files_to_convert = []
+
+        # Check if splitting is actually needed
+        if len(chunks) == 1 and chunks[0] == (1, num_pages) and size_mb <= 50 and num_pages <= 200:
+            new_filename = f"{base_name}_pages_1_{num_pages}.pdf"
+            new_path = os.path.join(output_dir, new_filename)
+
+            # Copy file to output dir with new name
+            shutil.copy(input_path, new_path)
+            files_to_convert.append(new_path)
+
+        else:
+            print("Splitting file...")
+            files_to_convert = split_pdf(input_path, chunks, output_dir)
 
     # 4. Upload Phase
     if not args.retrieve_only:
