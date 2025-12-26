@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--page-renumber", action="store_true", help="Renumbers the '## Page X' tags in output markdown files based on the filename.")
     parser.add_argument("--concat-mds", action="store_true", help="Concatenates renumbered markdown files into a single file.")
     parser.add_argument("--djvu-convert", action="store_true", help="Test DJVU to PDF conversion (converts input DJVU file to PDF without processing further).")
+    parser.add_argument("--chunk-pages", help="Custom page range for chunking (e.g., '329-400'). Creates chunks for specified pages and uploads them.")
+    parser.add_argument("--upload-missing", action="store_true", help="Find and upload chunk PDFs that have no lock file or MD file.")
 
     args = parser.parse_args()
 
@@ -123,6 +125,138 @@ def main():
             print(f"  Output: {result}")
         else:
             print(f"\nx DJVU conversion test failed.")
+        return
+
+    # Handle --upload-missing mode (find and upload chunks without lock/md files)
+    if args.upload_missing:
+        output_dir = args.output_dir
+        if not os.path.exists(output_dir):
+            print(f"Error: Output directory {output_dir} does not exist.")
+            return
+
+        # Find all chunk PDFs in output directory
+        chunk_pattern = os.path.join(output_dir, "*_pages_*_*.pdf")
+        all_chunks = glob.glob(chunk_pattern)
+
+        if not all_chunks:
+            print(f"No chunk files found in {output_dir}/")
+            return
+
+        # Filter to find those without lock file AND without md file
+        missing_uploads = []
+        for chunk_path in sorted(all_chunks):
+            base_name = os.path.splitext(os.path.basename(chunk_path))[0]
+            lock_file = os.path.join(output_dir, f"{base_name}.pdf.lock")
+            md_file = os.path.join(output_dir, f"{base_name}.md")
+
+            if not os.path.exists(lock_file) and not os.path.exists(md_file):
+                missing_uploads.append(chunk_path)
+
+        if not missing_uploads:
+            print(f"All {len(all_chunks)} chunk files have lock files or MD files. Nothing to upload.")
+            return
+
+        print(f"Found {len(missing_uploads)} chunk(s) without lock or MD files (out of {len(all_chunks)} total):")
+        for chunk_path in missing_uploads:
+            print(f"  - {os.path.basename(chunk_path)}")
+
+        print(f"\n{'='*25} UPLOAD PHASE {'='*24}")
+        print(f"Starting upload of {len(missing_uploads)} file(s)...")
+        print(f"Using {get_account_count()} API account(s) with failover")
+        print(f"{'='*60}\n")
+
+        for i, file_path in enumerate(missing_uploads, 1):
+            print(f"[{i}/{len(missing_uploads)}] Uploading: {os.path.basename(file_path)}")
+            upload_chunk(file_path, output_dir)
+            print("-" * 30)
+
+        print(f"\n{'='*60}")
+        print(f"Upload of missing chunks complete!")
+        print(f"{'='*60}")
+        return
+
+    # Handle --chunk-pages mode (custom chunking for specific page range)
+    if args.chunk_pages:
+        if not args.input_file:
+            parser.error("input_file is required when using --chunk-pages.")
+            return
+
+        input_path = args.input_file
+        if not os.path.exists(input_path):
+            print(f"Error: File {input_path} not found.")
+            return
+
+        # Parse page range (e.g., "329-400")
+        try:
+            start_page, end_page = map(int, args.chunk_pages.split('-'))
+            if start_page > end_page or start_page < 1:
+                raise ValueError("Invalid range")
+        except ValueError:
+            print(f"Error: Invalid page range format. Use 'START-END' (e.g., '329-400').")
+            return
+
+        # Create output directory
+        output_dir = args.output_dir
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # Analyze the file to validate page range
+        from .pdf_processor import analyze_pdf, split_pdf, calculate_chunks
+        size_mb, num_pages = analyze_pdf(input_path)
+        if end_page > num_pages:
+            print(f"Error: End page {end_page} exceeds file's total pages ({num_pages}).")
+            return
+
+        print(f"Custom chunking mode: Pages {start_page}-{end_page} of {input_path}")
+        print(f"Source file: {size_mb:.2f} MB, {num_pages} pages total")
+
+        # Calculate chunks for the specified range
+        range_pages = end_page - start_page + 1
+        range_size_mb = size_mb * (range_pages / num_pages)  # Estimate size proportionally
+
+        print(f"Range: {range_pages} pages, ~{range_size_mb:.2f} MB (estimated)")
+
+        # Calculate chunks within the range (respecting 50MB/190 page limits)
+        if range_size_mb > 50:
+            avg_page_size_mb = range_size_mb / range_pages
+            pages_per_40mb = int(40 / avg_page_size_mb)
+            pages_per_chunk = max(1, min(pages_per_40mb, 190))
+        elif range_pages > 190:
+            pages_per_chunk = 190
+        else:
+            pages_per_chunk = range_pages
+
+        chunks = []
+        current_page = start_page
+        while current_page <= end_page:
+            chunk_end = min(current_page + pages_per_chunk - 1, end_page)
+            chunks.append((current_page, chunk_end))
+            current_page = chunk_end + 1
+
+        print(f"Will create {len(chunks)} chunk(s):")
+        for i, (s, e) in enumerate(chunks, 1):
+            print(f"  Chunk {i}: Pages {s}-{e}")
+
+        # Create the chunks
+        print(f"\nSplitting file...")
+        files_to_convert = split_pdf(input_path, chunks, output_dir)
+        print(f"Created {len(files_to_convert)} chunk file(s)")
+
+        # Upload the chunks
+        print(f"\n{'='*25} UPLOAD PHASE {'='*24}")
+        print(f"Starting upload of {len(files_to_convert)} file(s)...")
+        print(f"Using {get_account_count()} API account(s) with failover")
+        print(f"{'='*60}\n")
+
+        for i, file_path in enumerate(files_to_convert, 1):
+            print(f"[{i}/{len(files_to_convert)}] Uploading: {os.path.basename(file_path)}")
+            upload_chunk(file_path, output_dir)
+            print("-" * 30)
+
+        print(f"\n{'='*60}")
+        print(f"Custom chunking and upload complete!")
+        print(f"Use --retrieve-only later to get the results.")
+        print(f"{'='*60}")
         return
 
     # Ensure input_file is provided if not in status check mode

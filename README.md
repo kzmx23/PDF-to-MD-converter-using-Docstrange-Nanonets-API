@@ -155,7 +155,14 @@ These tools work on already generated files or use record IDs.
     python3 -m app "test/том 1 книга 3.pdf" --page-renumber
     ```
 
--   `--concat-mds`: First runs the renumbering process, then merges all the Markdown chunks into a single file named `<basename>_concat_pages_1_NNN.md`. Requires `input_file`.
+-   `--concat-mds`: Validates all chunks are complete, runs the renumbering process, then merges all the Markdown chunks into a single file named `<basename>_concat_pages_1_NNN.md`. Requires `input_file`.
+
+    **Validation checks performed before concatenation:**
+    - No `.lock` files exist (all chunks finished processing)
+    - All PDF chunks have corresponding `.md` files
+    - Page ranges are continuous with no gaps (1→N)
+
+    If validation fails, concatenation is aborted with an error message.
     ```bash
     python3 -m app "test/том 1 книга 3.pdf" --concat-mds
     ```
@@ -163,6 +170,19 @@ These tools work on already generated files or use record IDs.
 -   `--djvu-convert`: Test DJVU to PDF conversion without processing further. Useful for testing DJVU conversion independently.
     ```bash
     python3 -m app "test/sample1.djvu" --djvu-convert
+    ```
+
+-   `--chunk-pages <START-END>`: Create chunks for a specific page range and upload them. Useful for processing missing pages or re-processing specific sections.
+    ```bash
+    # Create chunks for pages 329-400 and upload them
+    python3 -m app "path/to/file.pdf" --chunk-pages=329-400
+    ```
+    The algorithm respects API limits (max 50MB, max 190 pages per chunk) and will split the range into multiple chunks if needed.
+
+-   `--upload-missing`: Scan the output directory for chunk PDF files that don't have a corresponding lock file or MD file, and upload them.
+    ```bash
+    # Find and upload any chunks that weren't processed
+    python3 -m app --upload-missing
     ```
 
 ---

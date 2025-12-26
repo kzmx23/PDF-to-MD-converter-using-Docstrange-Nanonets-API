@@ -142,24 +142,120 @@ if __name__ == '__main__':
     os.remove("output/test_book_pages_6_8.md")
 
 
+def validate_chunks_for_concatenation(base_name, output_dir):
+    """
+    Validates that all conditions are met for concatenation:
+    1. No lock files exist for any chunks
+    2. All chunks have corresponding .md files
+    3. Page ranges are continuous (cover 1 to last_page with no gaps)
+
+    Returns (valid, message, md_files, total_pages) tuple.
+    """
+    # Find all chunk PDFs
+    pdf_pattern = os.path.join(output_dir, f"{glob.escape(base_name)}_pages_*.pdf")
+    chunk_pdfs = glob.glob(pdf_pattern)
+
+    # Find all MD files
+    md_pattern = os.path.join(output_dir, f"{glob.escape(base_name)}_pages_*.md")
+    md_files = glob.glob(md_pattern)
+
+    # Find all lock files
+    lock_pattern = os.path.join(output_dir, f"{glob.escape(base_name)}_pages_*.pdf.lock")
+    lock_files = glob.glob(lock_pattern)
+
+    # Check 1: No lock files should exist
+    if lock_files:
+        lock_names = [os.path.basename(f) for f in lock_files]
+        return False, f"Lock files still exist (processing not complete): {lock_names}", None, 0
+
+    if not md_files:
+        return False, "No markdown files found", None, 0
+
+    # Parse page ranges from all sources
+    def parse_page_range(filepath):
+        match = re.search(r'_pages_(\d+)_(\d+)\.(pdf|md)', filepath)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+        return None, None
+
+    # Get page ranges from PDFs and MDs
+    pdf_ranges = set()
+    for pdf in chunk_pdfs:
+        start, end = parse_page_range(pdf)
+        if start is not None:
+            pdf_ranges.add((start, end))
+
+    md_ranges = set()
+    for md in md_files:
+        start, end = parse_page_range(md)
+        if start is not None:
+            md_ranges.add((start, end))
+
+    # Check 2: All PDFs should have corresponding MDs
+    if pdf_ranges:
+        missing_mds = pdf_ranges - md_ranges
+        if missing_mds:
+            missing_str = [f"pages_{s}_{e}" for s, e in sorted(missing_mds)]
+            return False, f"Missing MD files for chunks: {missing_str}", None, 0
+
+    # Check 3: Page ranges should be continuous
+    sorted_ranges = sorted(md_ranges, key=lambda x: x[0])
+
+    if not sorted_ranges:
+        return False, "No valid page ranges found", None, 0
+
+    # Verify ranges start at 1
+    first_start, _ = sorted_ranges[0]
+    if first_start != 1:
+        return False, f"Page ranges don't start at 1 (first chunk starts at {first_start})", None, 0
+
+    # Verify ranges are continuous (no gaps)
+    expected_next = 1
+    for start, end in sorted_ranges:
+        if start != expected_next:
+            return False, f"Gap in page ranges: expected page {expected_next}, but found chunk starting at {start}", None, 0
+        expected_next = end + 1
+
+    total_pages = sorted_ranges[-1][1]
+
+    # Sort md_files for return
+    def sort_key(filepath):
+        match = re.search(r'_pages_(\d+)_', filepath)
+        return int(match.group(1)) if match else 0
+    md_files.sort(key=sort_key)
+
+    return True, f"Validation passed: {len(md_files)} chunks covering pages 1-{total_pages}", md_files, total_pages
+
+
 def concatenate_markdown_files(base_input_path, output_dir):
     """
     Finds, renumbers, and then concatenates all markdown files for a given base file.
+    Validates that all conditions are met before proceeding.
     """
     print("\n=== Starting Markdown Concatenation Process ===")
 
-    # 1. Ensure files are correctly numbered before concatenation
-    print("\nStep 1: Running page renumbering pre-check...")
-    renumber_markdown_files(base_input_path, output_dir)
-    print("\n--- Renumbering pre-check complete ---\n")
-
-    # 2. Find all relevant markdown files again
     base_name = os.path.splitext(os.path.basename(base_input_path))[0]
 
     # For DJVU files, the converted PDF has "_converted" suffix
     if base_input_path.lower().endswith('.djvu'):
         base_name = f"{base_name}_converted"
 
+    # Step 1: Validate all conditions are met
+    print("\nStep 1: Validating chunks...")
+    valid, message, md_files, total_pages = validate_chunks_for_concatenation(base_name, output_dir)
+    print(f"  {message}")
+
+    if not valid:
+        print("\n✗ Concatenation aborted - validation failed.")
+        print("==============================================")
+        return
+
+    # Step 2: Run page renumbering
+    print("\nStep 2: Running page renumbering pre-check...")
+    renumber_markdown_files(base_input_path, output_dir)
+    print("\n--- Renumbering pre-check complete ---\n")
+
+    # Step 3: Find files again (renumbering doesn't change file list)
     search_pattern = os.path.join(output_dir, f"{base_name}_pages_*.md")
     md_files = glob.glob(search_pattern)
 
@@ -167,30 +263,30 @@ def concatenate_markdown_files(base_input_path, output_dir):
         print(f"No markdown files found for concatenation with pattern: {search_pattern}")
         return
 
-    # 3. Sort files numerically by starting page
+    # Sort files numerically by starting page
     def sort_key(filepath):
         match = re.search(r'_pages_(\d+)_', filepath)
         return int(match.group(1)) if match else 0
     md_files.sort(key=sort_key)
-    
-    print(f"Step 2: Found {len(md_files)} markdown files to concatenate.")
 
-    # 4. Determine final filename
+    print(f"Step 3: Found {len(md_files)} markdown files to concatenate.")
+
+    # Determine final filename
     last_file = md_files[-1]
     match = re.search(r'_pages_(\d+)_(\d+)\.md$', os.path.basename(last_file))
     if not match:
         print(f"  ✗ Error: Could not parse final page number from '{os.path.basename(last_file)}'. Aborting concatenation.")
         return
-        
+
     end_page_from_last_file = match.group(2)
     final_filename = f"{base_name}_concat_pages_1_{end_page_from_last_file}.md"
     final_filepath = os.path.join(output_dir, final_filename)
-    
-    print(f"Step 3: Determined final output file name: {final_filename}")
 
-    # 5. Concatenate content
+    print(f"Step 4: Determined final output file name: {final_filename}")
+
+    # Concatenate content
     all_content = []
-    print("Step 4: Reading and combining files...")
+    print("Step 5: Reading and combining files...")
     for md_file in md_files:
         try:
             with open(md_file, 'r', encoding='utf-8') as f:
@@ -199,15 +295,15 @@ def concatenate_markdown_files(base_input_path, output_dir):
         except IOError as e:
             print(f"  ✗ Error reading file {md_file}: {e}. Aborting.")
             return
-            
+
     # Join with a clear separator
     final_content = "\n\n---\n\n".join(all_content)
-    
-    # 6. Write final concatenated file
+
+    # Write final concatenated file
     try:
         with open(final_filepath, 'w', encoding='utf-8') as f:
             f.write(final_content)
-        print(f"\nStep 5: Successfully created concatenated file: {final_filepath}")
+        print(f"\nStep 6: Successfully created concatenated file: {final_filepath}")
         print("==============================================")
 
     except IOError as e:
