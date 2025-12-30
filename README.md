@@ -7,6 +7,7 @@ A Python application that converts PDF and DJVU files to Markdown format using t
 -   **PDF & DJVU to Markdown Conversion**: Utilizes the NanoNets async API to convert PDF and DJVU content to Markdown.
 -   **DJVU Support**: Automatically detects and converts DJVU files to PDF before processing. Smart caching avoids redundant conversions.
 -   **Automatic File Splitting**: Handles PDF files that exceed the API's limits (50MB size or 200 pages) by automatically splitting them into valid chunks.
+-   **Start Page Support**: Files with `_from_XXX_page` in the filename will skip pages 1 to XXX-1 and start processing from page XXX. Useful for resuming partial scans or processing specific page ranges.
 -   **Multi-Account Failover**: Configure up to 4 NanoNets API accounts for automatic failover when rate limits are exceeded. Different chunks can use different accounts.
 -   **Resumable Processing**: Creates `.lock` files for uploaded chunks (storing account_id:record_id), allowing the conversion to be resumed if interrupted. The `--retrieve-only` flag forces the app to only check for results of already-uploaded files.
 -   **Smart Retry Logic**: Automatically retries transient errors (SSL, connection timeouts, 5xx server errors) up to 3 times before failing over to the next account.
@@ -133,6 +134,23 @@ If the process was stopped, some `.lock` files may exist in `output/`. Running t
 ```bash
 python3 -m app "test/том 1 книга 3.pdf" --retrieve-only
 ```
+
+**Example: Process from a specific start page**
+If you have a file where only pages from a certain point need processing (e.g., you already have pages 1-200 converted), rename the file with `_from_XXX_page` pattern:
+```bash
+# Original file: "textbook.pdf" (500 pages)
+# Rename to: "textbook_from_201_page.pdf"
+# This will only process pages 201-500
+
+python3 -m app "textbook_from_201_page.pdf"
+```
+
+The app will:
+- Detect `_from_201_page` in the filename
+- Skip pages 1-200
+- Create chunks starting from page 201 (e.g., `textbook_from_201_page_pages_201_390.pdf`)
+- Renumber markdown pages correctly (`## Page 201`, `## Page 202`, etc.)
+- Create concatenated file as `textbook_from_201_page_concat_pages_201_500.md`
 
 ---
 

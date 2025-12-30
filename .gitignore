@@ -25,3 +25,4 @@ logs/
 
 # Pytest cache
 .pytest_cache/
+daemon.log

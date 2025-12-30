@@ -1,6 +1,24 @@
 import os
+import re
 import math
 from pypdf import PdfReader, PdfWriter
+
+
+def parse_start_page_from_filename(file_path):
+    """
+    Parses the filename for _from_XXX_page pattern.
+    Returns the starting page number (XXX) if found, otherwise returns 1.
+
+    Example:
+        'book_from_100_page.pdf' -> 100
+        'document.pdf' -> 1
+    """
+    filename = os.path.basename(file_path)
+    match = re.search(r'_from_(\d+)_page', filename, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return 1
+
 
 def analyze_pdf(file_path):
     """
@@ -11,41 +29,57 @@ def analyze_pdf(file_path):
     num_pages = len(reader.pages)
     return file_size_mb, num_pages
 
-def calculate_chunks(file_size_mb, num_pages):
+def calculate_chunks(file_size_mb, num_pages, start_page=1):
     """
     Calculates the splitting plan based on file size and page count.
     Returns a list of tuples (start_page, end_page).
     start_page and end_page are 1-based inclusive.
+
+    Args:
+        file_size_mb: File size in megabytes
+        num_pages: Total number of pages in the file
+        start_page: Page number to start processing from (default: 1).
+                    Pages before start_page will be ignored.
     """
     chunks = []
-    
-    if file_size_mb > 50:
+
+    # Calculate the effective range we're processing
+    effective_pages = num_pages - start_page + 1
+
+    if effective_pages <= 0:
+        # Invalid range - start_page is beyond the document
+        return []
+
+    # Estimate size of the portion we're processing
+    effective_size_mb = file_size_mb * (effective_pages / num_pages)
+
+    if effective_size_mb > 50:
         # Split by size logic
-        avg_page_size_mb = file_size_mb / num_pages
+        avg_page_size_mb = effective_size_mb / effective_pages
         pages_per_40mb = math.floor(40 / avg_page_size_mb)
 
         # Ensure chunk doesn't exceed 190 pages (API limit is 200)
         # Also ensure at least 1 page per chunk to avoid infinite loops if pages are huge
         pages_per_chunk = max(1, min(pages_per_40mb, 190))
 
-        current_page = 1
+        current_page = start_page
         while current_page <= num_pages:
             end_page = min(current_page + pages_per_chunk - 1, num_pages)
             chunks.append((current_page, end_page))
             current_page = end_page + 1
-            
-    elif num_pages > 200:
+
+    elif effective_pages > 200:
         # Split by page count logic (file size <= 50MB but pages > 200)
         pages_per_chunk = 190
-        current_page = 1
+        current_page = start_page
         while current_page <= num_pages:
             end_page = min(current_page + pages_per_chunk - 1, num_pages)
             chunks.append((current_page, end_page))
             current_page = end_page + 1
     else:
-        # No splitting needed
-        chunks.append((1, num_pages))
-        
+        # No splitting needed - single chunk from start_page to end
+        chunks.append((start_page, num_pages))
+
     return chunks
 
 def split_pdf(file_path, chunks, output_dir):

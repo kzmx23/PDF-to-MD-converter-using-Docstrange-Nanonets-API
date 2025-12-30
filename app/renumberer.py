@@ -1,6 +1,7 @@
 import re
 import os
 import glob
+from .pdf_processor import parse_start_page_from_filename
 
 def renumber_markdown_files(base_input_path, output_dir):
     """
@@ -142,14 +143,20 @@ if __name__ == '__main__':
     os.remove("output/test_book_pages_6_8.md")
 
 
-def validate_chunks_for_concatenation(base_name, output_dir):
+def validate_chunks_for_concatenation(base_name, output_dir, expected_start_page=1):
     """
     Validates that all conditions are met for concatenation:
     1. No lock files exist for any chunks
     2. All chunks have corresponding .md files
-    3. Page ranges are continuous (cover 1 to last_page with no gaps)
+    3. Page ranges are continuous (cover expected_start_page to last_page with no gaps)
 
-    Returns (valid, message, md_files, total_pages) tuple.
+    Args:
+        base_name: Base name of the file (without extension)
+        output_dir: Directory containing the chunk files
+        expected_start_page: Expected starting page number (default: 1).
+                            Used for files with _from_XXX_page pattern.
+
+    Returns (valid, message, md_files, total_pages, start_page) tuple.
     """
     # Find all chunk PDFs
     pdf_pattern = os.path.join(output_dir, f"{glob.escape(base_name)}_pages_*.pdf")
@@ -166,10 +173,10 @@ def validate_chunks_for_concatenation(base_name, output_dir):
     # Check 1: No lock files should exist
     if lock_files:
         lock_names = [os.path.basename(f) for f in lock_files]
-        return False, f"Lock files still exist (processing not complete): {lock_names}", None, 0
+        return False, f"Lock files still exist (processing not complete): {lock_names}", None, 0, expected_start_page
 
     if not md_files:
-        return False, "No markdown files found", None, 0
+        return False, "No markdown files found", None, 0, expected_start_page
 
     # Parse page ranges from all sources
     def parse_page_range(filepath):
@@ -196,24 +203,26 @@ def validate_chunks_for_concatenation(base_name, output_dir):
         missing_mds = pdf_ranges - md_ranges
         if missing_mds:
             missing_str = [f"pages_{s}_{e}" for s, e in sorted(missing_mds)]
-            return False, f"Missing MD files for chunks: {missing_str}", None, 0
+            return False, f"Missing MD files for chunks: {missing_str}", None, 0, expected_start_page
 
     # Check 3: Page ranges should be continuous
     sorted_ranges = sorted(md_ranges, key=lambda x: x[0])
 
     if not sorted_ranges:
-        return False, "No valid page ranges found", None, 0
+        return False, "No valid page ranges found", None, 0, expected_start_page
 
-    # Verify ranges start at 1
+    # Detect actual start page from the first chunk
     first_start, _ = sorted_ranges[0]
-    if first_start != 1:
-        return False, f"Page ranges don't start at 1 (first chunk starts at {first_start})", None, 0
 
-    # Verify ranges are continuous (no gaps)
-    expected_next = 1
+    # If expected_start_page is 1 but chunks start at a different page,
+    # auto-detect the start page from the chunks
+    actual_start_page = first_start
+
+    # Verify ranges are continuous (no gaps) from the actual start
+    expected_next = actual_start_page
     for start, end in sorted_ranges:
         if start != expected_next:
-            return False, f"Gap in page ranges: expected page {expected_next}, but found chunk starting at {start}", None, 0
+            return False, f"Gap in page ranges: expected page {expected_next}, but found chunk starting at {start}", None, 0, actual_start_page
         expected_next = end + 1
 
     total_pages = sorted_ranges[-1][1]
@@ -224,7 +233,7 @@ def validate_chunks_for_concatenation(base_name, output_dir):
         return int(match.group(1)) if match else 0
     md_files.sort(key=sort_key)
 
-    return True, f"Validation passed: {len(md_files)} chunks covering pages 1-{total_pages}", md_files, total_pages
+    return True, f"Validation passed: {len(md_files)} chunks covering pages {actual_start_page}-{total_pages}", md_files, total_pages, actual_start_page
 
 
 def concatenate_markdown_files(base_input_path, output_dir):
@@ -240,9 +249,12 @@ def concatenate_markdown_files(base_input_path, output_dir):
     if base_input_path.lower().endswith('.djvu'):
         base_name = f"{base_name}_converted"
 
+    # Detect start page from filename
+    start_page = parse_start_page_from_filename(base_input_path)
+
     # Step 1: Validate all conditions are met
     print("\nStep 1: Validating chunks...")
-    valid, message, md_files, total_pages = validate_chunks_for_concatenation(base_name, output_dir)
+    valid, message, md_files, total_pages, actual_start_page = validate_chunks_for_concatenation(base_name, output_dir, start_page)
     print(f"  {message}")
 
     if not valid:
@@ -271,15 +283,20 @@ def concatenate_markdown_files(base_input_path, output_dir):
 
     print(f"Step 3: Found {len(md_files)} markdown files to concatenate.")
 
-    # Determine final filename
+    # Determine final filename - use actual start page from chunks
+    first_file = md_files[0]
     last_file = md_files[-1]
-    match = re.search(r'_pages_(\d+)_(\d+)\.md$', os.path.basename(last_file))
-    if not match:
-        print(f"  ✗ Error: Could not parse final page number from '{os.path.basename(last_file)}'. Aborting concatenation.")
+
+    first_match = re.search(r'_pages_(\d+)_(\d+)\.md$', os.path.basename(first_file))
+    last_match = re.search(r'_pages_(\d+)_(\d+)\.md$', os.path.basename(last_file))
+
+    if not first_match or not last_match:
+        print(f"  ✗ Error: Could not parse page numbers from filenames. Aborting concatenation.")
         return
 
-    end_page_from_last_file = match.group(2)
-    final_filename = f"{base_name}_concat_pages_1_{end_page_from_last_file}.md"
+    start_page_from_first_file = first_match.group(1)
+    end_page_from_last_file = last_match.group(2)
+    final_filename = f"{base_name}_concat_pages_{start_page_from_first_file}_{end_page_from_last_file}.md"
     final_filepath = os.path.join(output_dir, final_filename)
 
     print(f"Step 4: Determined final output file name: {final_filename}")

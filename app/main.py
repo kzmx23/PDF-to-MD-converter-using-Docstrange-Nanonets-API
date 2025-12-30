@@ -4,7 +4,7 @@ import glob
 import argparse
 import shutil
 from dotenv import load_dotenv
-from .pdf_processor import analyze_pdf, calculate_chunks, split_pdf
+from .pdf_processor import analyze_pdf, calculate_chunks, split_pdf, parse_start_page_from_filename
 from .converter import convert_file, get_file_status, upload_chunk, retrieve_chunk
 from .renumberer import renumber_markdown_files, concatenate_markdown_files
 from .djvu_converter import convert_djvu_to_pdf
@@ -201,7 +201,6 @@ def main():
             os.makedirs(output_dir)
 
         # Analyze the file to validate page range
-        from .pdf_processor import analyze_pdf, split_pdf, calculate_chunks
         size_mb, num_pages = analyze_pdf(input_path)
         if end_page > num_pages:
             print(f"Error: End page {end_page} exceeds file's total pages ({num_pages}).")
@@ -310,6 +309,11 @@ def main():
 
     base_name = os.path.splitext(os.path.basename(input_path))[0]
 
+    # Detect start page from filename (_from_XXX_page pattern)
+    start_page = parse_start_page_from_filename(input_path)
+    if start_page > 1:
+        print(f"Detected start page from filename: {start_page}")
+
     # For --retrieve-only mode, find existing lock files instead of recalculating chunks
     if args.retrieve_only:
         files_to_convert = find_existing_chunks(base_name, output_dir)
@@ -329,12 +333,23 @@ def main():
         print(f"File Size: {size_mb:.2f} MB")
         print(f"Page Count: {num_pages}")
 
-        # 2. Calculate Chunks
-        chunks = calculate_chunks(size_mb, num_pages)
+        # Validate start_page
+        if start_page > num_pages:
+            print(f"Error: Start page {start_page} exceeds total pages ({num_pages}).")
+            return
+
+        if start_page > 1:
+            effective_pages = num_pages - start_page + 1
+            print(f"Processing pages {start_page}-{num_pages} ({effective_pages} pages)")
+
+        # 2. Calculate Chunks (starting from detected start_page)
+        chunks = calculate_chunks(size_mb, num_pages, start_page)
 
         if args.dry_run:
             print("\n--- Dry Run Plan ---")
-            if len(chunks) == 1 and chunks[0] == (1, num_pages) and size_mb <= 50 and num_pages <= 200:
+            effective_pages = num_pages - start_page + 1
+            effective_size = size_mb * (effective_pages / num_pages)
+            if len(chunks) == 1 and chunks[0] == (start_page, num_pages) and effective_size <= 50 and effective_pages <= 200:
                  print("File is within limits. No splitting required.")
                  print(f"Plan: Convert {input_path} -> {os.path.join(output_dir, os.path.splitext(os.path.basename(input_path))[0] + '.md')}")
             else:
@@ -351,14 +366,21 @@ def main():
 
         files_to_convert = []
 
-        # Check if splitting is actually needed
-        if len(chunks) == 1 and chunks[0] == (1, num_pages) and size_mb <= 50 and num_pages <= 200:
-            new_filename = f"{base_name}_pages_1_{num_pages}.pdf"
+        # Check if splitting is actually needed (single chunk within limits)
+        effective_pages = num_pages - start_page + 1
+        effective_size = size_mb * (effective_pages / num_pages)
+        if len(chunks) == 1 and chunks[0] == (start_page, num_pages) and effective_size <= 50 and effective_pages <= 200:
+            new_filename = f"{base_name}_pages_{start_page}_{num_pages}.pdf"
             new_path = os.path.join(output_dir, new_filename)
 
-            # Copy file to output dir with new name
-            shutil.copy(input_path, new_path)
-            files_to_convert.append(new_path)
+            if start_page > 1:
+                # Need to extract pages from start_page to end
+                print(f"Extracting pages {start_page}-{num_pages}...")
+                files_to_convert = split_pdf(input_path, chunks, output_dir)
+            else:
+                # Copy file to output dir with new name
+                shutil.copy(input_path, new_path)
+                files_to_convert.append(new_path)
 
         else:
             print("Splitting file...")
