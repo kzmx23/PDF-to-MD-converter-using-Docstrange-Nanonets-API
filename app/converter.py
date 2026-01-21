@@ -209,6 +209,7 @@ def upload_file(file_path, api_key, max_retries=3, retry_delay=5):
         except requests.exceptions.RequestException as e:
             print(f"  x Request error: {e}")
             # Try to get more details from the response
+            should_try_next = False
             if hasattr(e, 'response') and e.response is not None:
                 try:
                     error_detail = e.response.json().get('detail', e.response.text)
@@ -216,7 +217,10 @@ def upload_file(file_path, api_key, max_retries=3, retry_delay=5):
                     error_detail = e.response.text
                 if error_detail:
                     print(f"  -> API message: {error_detail}")
-            return None, False
+                # For auth errors (401, 403), try next account
+                if e.response.status_code in (401, 403):
+                    should_try_next = True
+            return None, should_try_next
 
         except Exception as e:
             print(f"  x Error uploading file: {e}")
