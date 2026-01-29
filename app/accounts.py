@@ -2,14 +2,15 @@
 NanoNets API Accounts Manager
 
 Manages multiple API accounts for failover support.
-Lock file format: account_id:record_id:start_ts:last_check_ts:pages_processed
-Example: "3:1627690:1706526000:1706533200:40"
+Lock file format: account_id:record_id:start_time:last_check_time:pages_processed
+Example: "3:1627690:2024-01-29-10-30:2024-01-29-11-45:40"
 
-Old format (account_id:record_id) is still supported for backward compatibility.
+Old formats (account_id:record_id or with Unix timestamps) are still supported.
 """
 
 import os
 import time
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -45,11 +46,40 @@ def get_account_count() -> int:
     return len(ACCOUNTS)
 
 
+def _parse_time(time_str: str) -> int:
+    """
+    Parse time string to Unix timestamp.
+    Supports both human-readable format (yyyy-mm-dd-hh-mm) and Unix timestamps.
+    """
+    if not time_str or time_str == '0':
+        return 0
+
+    # Check if it's a Unix timestamp (all digits)
+    if time_str.isdigit():
+        return int(time_str)
+
+    # Parse human-readable format: yyyy-mm-dd-hh-mm
+    try:
+        dt = datetime.strptime(time_str, "%Y-%m-%d-%H-%M")
+        return int(dt.timestamp())
+    except ValueError:
+        return 0
+
+
+def _format_time(ts: int) -> str:
+    """
+    Format Unix timestamp to human-readable string (yyyy-mm-dd-hh-mm).
+    """
+    if ts == 0:
+        return "0"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d-%H-%M")
+
+
 def parse_lock_file(content: str) -> dict:
     """
     Parse lock file content.
     Returns dict with keys: account_id, record_id, start_ts, last_check_ts, pages_processed.
-    Supports old format (account_id:record_id) and new extended format.
+    Supports old format (account_id:record_id) and new extended format with human-readable times.
     """
     content = content.strip()
     parts = content.split(':')
@@ -67,10 +97,10 @@ def parse_lock_file(content: str) -> dict:
         result['record_id'] = parts[1]
 
     if len(parts) >= 3:
-        result['start_ts'] = int(parts[2])
+        result['start_ts'] = _parse_time(parts[2])
 
     if len(parts) >= 4:
-        result['last_check_ts'] = int(parts[3])
+        result['last_check_ts'] = _parse_time(parts[3])
 
     if len(parts) >= 5:
         result['pages_processed'] = int(parts[4])
@@ -82,13 +112,17 @@ def format_lock_content(account_id: int, record_id: str, start_ts: int = None,
                         last_check_ts: int = None, pages_processed: int = 0) -> str:
     """
     Format content for lock file with extended metadata.
+    Uses human-readable time format: yyyy-mm-dd-hh-mm
     """
     if start_ts is None:
         start_ts = int(time.time())
     if last_check_ts is None:
         last_check_ts = start_ts
 
-    return f"{account_id}:{record_id}:{start_ts}:{last_check_ts}:{pages_processed}"
+    start_str = _format_time(start_ts)
+    last_check_str = _format_time(last_check_ts)
+
+    return f"{account_id}:{record_id}:{start_str}:{last_check_str}:{pages_processed}"
 
 
 def is_stuck(lock_data: dict, stuck_threshold_hours: float = 2.0) -> bool:
