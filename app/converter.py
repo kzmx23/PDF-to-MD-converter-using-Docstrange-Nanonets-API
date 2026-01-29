@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import requests
 from requests.exceptions import SSLError, ConnectionError, Timeout
@@ -297,6 +298,21 @@ def check_status_and_retrieve(record_id, api_key, total_pages=0, max_retries=3, 
             if status == "completed":
                 print(f"  -> Status: completed.")
                 content = result.get("content", "")
+
+                # New API format: content is a JSON string containing formats.markdown.content
+                if content and content.strip().startswith('{'):
+                    try:
+                        content_obj = json.loads(content)
+                        # Extract markdown content from nested structure
+                        formats = content_obj.get("formats", {})
+                        markdown_data = formats.get("markdown", {})
+                        markdown_content = markdown_data.get("content", "")
+                        if markdown_content:
+                            content = markdown_content
+                    except (json.JSONDecodeError, TypeError):
+                        # If parsing fails, use content as-is (old format)
+                        pass
+
                 if not content:
                     print(f"  ! Warning: Content is empty in completed response.")
                 return content
