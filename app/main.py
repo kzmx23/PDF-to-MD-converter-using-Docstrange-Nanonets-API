@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--djvu-convert", action="store_true", help="Test DJVU to PDF conversion (converts input DJVU file to PDF without processing further).")
     parser.add_argument("--chunk-pages", help="Custom page range for chunking (e.g., '329-400'). Creates chunks for specified pages and uploads them.")
     parser.add_argument("--upload-missing", action="store_true", help="Find and upload chunk PDFs that have no lock file or MD file.")
+    parser.add_argument("--fix-json-md", help="Fix MD files that contain JSON instead of markdown. Provide file path or 'all' to fix all in output-dir.")
 
     args = parser.parse_args()
 
@@ -173,6 +174,106 @@ def main():
         print(f"\n{'='*60}")
         print(f"Upload of missing chunks complete!")
         print(f"{'='*60}")
+        return
+
+    # Handle --fix-json-md mode (convert JSON MD files to proper markdown)
+    if args.fix_json_md:
+        import json
+
+        def extract_markdown_from_json(json_str):
+            """Extract markdown content from a JSON string."""
+            content_obj = json.loads(json_str)
+            formats = content_obj.get("formats", {})
+            markdown_data = formats.get("markdown", {})
+            return markdown_data.get("content", "")
+
+        def fix_json_md_file(file_path):
+            """Convert a JSON-formatted MD file to proper markdown."""
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                # Check if content is JSON
+                if not content.strip().startswith('{'):
+                    print(f"  - {os.path.basename(file_path)}: Already in markdown format, skipping.")
+                    return False
+
+                # Try single JSON first
+                try:
+                    markdown_content = extract_markdown_from_json(content)
+                except json.JSONDecodeError:
+                    # File may contain multiple JSON objects (concatenated chunks)
+                    # Split by common separators and process each part
+                    markdown_parts = []
+
+                    # Try splitting by "\n\n---\n\n" (concatenation separator)
+                    parts = content.split("\n\n---\n\n")
+                    if len(parts) == 1:
+                        # Try splitting by "}\n{" pattern
+                        parts = re.split(r'\}\s*\n\s*\{', content)
+                        if len(parts) > 1:
+                            # Restore braces
+                            parts = [parts[0] + '}'] + ['{' + p + '}' for p in parts[1:-1]] + ['{' + parts[-1]]
+
+                    for part in parts:
+                        part = part.strip()
+                        if part.startswith('{'):
+                            try:
+                                md = extract_markdown_from_json(part)
+                                if md:
+                                    markdown_parts.append(md)
+                            except json.JSONDecodeError:
+                                continue
+
+                    if not markdown_parts:
+                        print(f"  x {os.path.basename(file_path)}: Could not extract markdown from JSON.")
+                        return False
+
+                    markdown_content = "\n\n---\n\n".join(markdown_parts)
+
+                if not markdown_content:
+                    print(f"  - {os.path.basename(file_path)}: No markdown content found in JSON.")
+                    return False
+
+                # Write the extracted markdown back to file
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(markdown_content)
+
+                print(f"  + {os.path.basename(file_path)}: Fixed successfully.")
+                return True
+
+            except Exception as e:
+                print(f"  x {os.path.basename(file_path)}: Error - {e}")
+                return False
+
+        output_dir = args.output_dir
+        fix_target = args.fix_json_md
+
+        if fix_target.lower() == 'all':
+            # Fix all MD files in output directory
+            md_pattern = os.path.join(output_dir, "**", "*.md")
+            md_files = glob.glob(md_pattern, recursive=True)
+
+            if not md_files:
+                print(f"No MD files found in {output_dir}/")
+                return
+
+            print(f"Scanning {len(md_files)} MD file(s) for JSON format...")
+            fixed = 0
+            for md_file in sorted(md_files):
+                if fix_json_md_file(md_file):
+                    fixed += 1
+
+            print(f"\nFixed {fixed} file(s).")
+        else:
+            # Fix specific file
+            if not os.path.exists(fix_target):
+                print(f"Error: File {fix_target} not found.")
+                return
+
+            print(f"Fixing: {fix_target}")
+            fix_json_md_file(fix_target)
+
         return
 
     # Handle --chunk-pages mode (custom chunking for specific page range)
