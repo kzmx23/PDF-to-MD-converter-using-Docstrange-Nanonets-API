@@ -11,13 +11,17 @@ import shutil
 import subprocess
 import fcntl
 import re
+import time
 from datetime import datetime
 from pathlib import Path
+
+from .accounts import parse_lock_file, is_stuck
 
 # Configuration
 INPUT_FOLDER = "input"
 OUTPUT_FOLDER = "output"
 DONE_FOLDER = os.path.join(OUTPUT_FOLDER, "done")
+STUCK_THRESHOLD_HOURS = 2.0  # Re-upload files stuck for more than 2 hours
 LOG_FILE = "/var/log/ds_nnt_pdf2md.log"
 LOCK_FILE = "/tmp/ds_nnt_pdf2md.lock"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -423,6 +427,78 @@ def process_pending_retrievals():
             run_retrieval(source_file)
 
 
+def process_stuck_files():
+    """
+    Check for stuck files (no progress for STUCK_THRESHOLD_HOURS) and re-upload them.
+    A file is considered stuck if it has a lock file with no progress for the threshold time.
+    """
+    # Find all lock files
+    lock_pattern = os.path.join(OUTPUT_FOLDER, "*_pages_*.pdf.lock")
+    lock_files = glob.glob(lock_pattern)
+
+    stuck_files = []
+
+    for lock_file in lock_files:
+        try:
+            with open(lock_file, 'r') as f:
+                lock_content = f.read().strip()
+
+            lock_data = parse_lock_file(lock_content)
+
+            if is_stuck(lock_data, STUCK_THRESHOLD_HOURS):
+                # Get the corresponding PDF file
+                pdf_file = lock_file[:-5]  # Remove ".lock"
+                if os.path.exists(pdf_file):
+                    stuck_files.append((pdf_file, lock_file, lock_data))
+        except Exception as e:
+            log_message(f"Error checking lock file {lock_file}: {e}")
+
+    if not stuck_files:
+        return
+
+    log_message(f"Found {len(stuck_files)} stuck file(s) (no progress for {STUCK_THRESHOLD_HOURS}h)")
+
+    for pdf_file, lock_file, lock_data in stuck_files:
+        base_name = os.path.basename(pdf_file)
+        pages_processed = lock_data.get('pages_processed', 0)
+        record_id = lock_data.get('record_id', 'unknown')
+
+        log_message(f"  Stuck file: {base_name}")
+        log_message(f"    Record ID: {record_id}, Pages: {pages_processed}")
+        log_message(f"    Deleting lock file and re-uploading...")
+
+        # Delete the lock file
+        try:
+            os.remove(lock_file)
+            log_message(f"    Deleted lock file: {os.path.basename(lock_file)}")
+        except Exception as e:
+            log_message(f"    Error deleting lock file: {e}")
+            continue
+
+        # Re-upload using upload-missing
+        try:
+            os.chdir(PROJECT_ROOT)
+            cmd = [
+                sys.executable, "-m", "app",
+                "--upload-missing",
+                "--output-dir", OUTPUT_FOLDER
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+            if result.stdout:
+                for line in result.stdout.split('\n'):
+                    if base_name in line or 'upload' in line.lower():
+                        log_message(f"    [APP] {line}")
+
+            if result.returncode == 0:
+                log_message(f"    Re-upload initiated for {base_name}")
+            else:
+                log_message(f"    Re-upload failed with exit code {result.returncode}")
+
+        except Exception as e:
+            log_message(f"    Error re-uploading: {e}")
+
+
 def main():
     """Main daemon entry point."""
     log_message("=" * 60)
@@ -444,10 +520,13 @@ def main():
 
             log_message(f"Found {len(input_files)} file(s) in input folder")
 
-            # First, try to retrieve results for files being processed
+            # First, check for stuck files and re-upload them
+            process_stuck_files()
+
+            # Then, try to retrieve results for files being processed
             process_pending_retrievals()
 
-            # Then, check for finished conversions and concatenate
+            # Check for finished conversions and concatenate
             process_finished_conversions()
 
             # Finally, process new files

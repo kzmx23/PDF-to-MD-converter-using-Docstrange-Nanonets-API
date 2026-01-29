@@ -89,7 +89,9 @@ def retrieve_chunk(file_path, output_dir):
         return None
 
     # Parse lock file (supports both old and new format)
-    account_id, record_id = parse_lock_file(lock_content)
+    lock_data = parse_lock_file(lock_content)
+    account_id = lock_data['account_id']
+    record_id = lock_data['record_id']
 
     try:
         api_key = get_api_key(account_id)
@@ -106,10 +108,16 @@ def retrieve_chunk(file_path, output_dir):
     except Exception:
         pass
 
-    result = check_status_and_retrieve(record_id, api_key, total_pages=total_pages)
+    result, pages_processed = check_status_and_retrieve(record_id, api_key, total_pages=total_pages)
 
-    # If result is a status string (e.g., "processing"), return it directly
+    # If result is a status string (e.g., "processing"), update lock file and return
     if result in ["processing", "failed"]:
+        # Update lock file with current timestamp and pages processed
+        import time
+        start_ts = lock_data['start_ts'] if lock_data['start_ts'] > 0 else int(time.time())
+        updated_lock = format_lock_content(account_id, record_id, start_ts, int(time.time()), pages_processed)
+        with open(lock_file_path, "w") as f:
+            f.write(updated_lock)
         return result
 
     # If result is None (error), return None
@@ -291,7 +299,7 @@ def check_status_and_retrieve(record_id, api_key, total_pages=0, max_retries=3, 
             if not result.get("success"):
                 error_detail = result.get('detail', 'Unknown error')
                 print(f"  x API returned error: {error_detail}")
-                return None
+                return None, api_pages
 
             status = api_status
 
@@ -315,16 +323,16 @@ def check_status_and_retrieve(record_id, api_key, total_pages=0, max_retries=3, 
 
                 if not content:
                     print(f"  ! Warning: Content is empty in completed response.")
-                return content
+                return content, api_pages
             elif status in ["processing", "failed"]:
                 progress_info = ""
                 if status == "processing" and total_pages > 0:
                     progress_info = f" (page {api_pages}/{total_pages} - {api_time:.2f}s)"
                 print(f"  -> Status: {status}{progress_info}. Will check again later.")
-                return status
+                return status, api_pages
             else:
                 print(f"  ! Unknown status: {status}")
-                return status
+                return status, api_pages
 
         except retryable_exceptions as e:
             error_type = type(e).__name__
@@ -334,7 +342,7 @@ def check_status_and_retrieve(record_id, api_key, total_pages=0, max_retries=3, 
                 time.sleep(retry_delay)
             else:
                 print(f"  x Max retries ({max_retries}) exceeded.")
-                return None
+                return None, 0
 
         except requests.exceptions.RequestException as e:
             print(f"  x Request error while checking status: {e}")
@@ -345,13 +353,13 @@ def check_status_and_retrieve(record_id, api_key, total_pages=0, max_retries=3, 
                     error_detail = e.response.text
                 if error_detail:
                     print(f"  -> API message: {error_detail}")
-            return None
+            return None, 0
 
         except Exception as e:
             print(f"  x Error while checking status: {e}")
-            return None
+            return None, 0
 
-    return None
+    return None, 0
 
 
 def get_file_status(record_id, api_key):
